@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Ahoy-Matey STL Prep (Anycubic Kobra 3)</title>
+  <style>
+    html, body { height: 100%; margin: 0; font-family: system-ui, Arial, sans-serif; background:#0b0f14; color:#e8eef6; }
+    .wrap { display: grid; grid-template-columns: 360px 1fr; height: 100%; }
+    .panel { padding: 14px; border-right: 1px solid #1f2a37; overflow:auto; }
+    .panel h1 { font-size: 16px; margin: 0 0 10px; }
+    .panel h2 { font-size: 13px; margin: 14px 0 8px; color:#b6c2d1; }
+    .row { display:flex; gap:10px; align-items:center; margin: 8px 0; }
+    label { font-size: 12px; width: 92px; color:#b6c2d1; }
+    input[type="number"] { width: 120px; padding: 6px; border-radius: 8px; border:1px solid #223042; background:#0f1621; color:#e8eef6; }
+    input[type="range"] { flex:1; }
+    button {
+      padding: 10px 10px; border-radius: 10px; border: 1px solid #223042;
+      background:#101a27; color:#e8eef6; cursor:pointer;
+    }
+    button:hover { background:#132033; }
+    .hint { font-size: 12px; color:#9fb0c4; line-height:1.4; }
+    .drop {
+      margin-top:10px; padding: 14px; border-radius: 12px; border:1px dashed #2b3a50;
+      background:#0f1621; color:#b6c2d1; text-align:center;
+    }
+    .canvas { position:relative; }
+    #viewer { width: 100%; height: 100%; display:block; }
+    .badge {
+      position:absolute; top:10px; left:10px;
+      background:rgba(16,26,39,.85); border:1px solid rgba(34,48,66,.9);
+      padding:8px 10px; border-radius: 10px; font-size: 12px; color:#cfe0f6;
+    }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; color:#b6c2d1; }
+    .small { font-size: 11px; color:#9fb0c4; }
+    .warn { color:#ffcf66; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="panel">
+      <h1>STL Prep — Anycubic Kobra 3</h1>
+      <div class="hint">
+        Load an STL, adjust transforms, auto-center on bed, then export a transformed STL for slicing.
+        <div class="small warn">STL → Slice → G-code. This tool does not slice.</div>
+      </div>
+
+      <h2>Load</h2>
+      <div class="row">
+        <input id="file" type="file" accept=".stl" />
+      </div>
+      <div id="drop" class="drop">Drag &amp; drop STL here</div>
+
+      <h2>Printer Bed</h2>
+      <div class="row">
+        <label>Bed X (mm)</label><input id="bedX" type="number" value="220" min="50" max="500" step="1" />
+      </div>
+      <div class="row">
+        <label>Bed Y (mm)</label><input id="bedY" type="number" value="220" min="50" max="500" step="1" />
+      </div>
+      <div class="row">
+        <label>Bed Z (mm)</label><input id="bedZ" type="number" value="250" min="50" max="600" step="1" />
+      </div>
+
+      <h2>Transform</h2>
+      <div class="row">
+        <label>Uniform scale</label>
+        <input id="scale" type="number" value="1" step="0.01" />
+        <button id="fit">Fit to bed</button>
+      </div>
+
+      <div class="row"><label>Rotate X</label><input id="rx" type="range" min="-180" max="180" value="0" /><span id="rxv" class="mono">0°</span></div>
+      <div class="row"><label>Rotate Y</label><input id="ry" type="range" min="-180" max="180" value="0" /><span id="ryv" class="mono">0°</span></div>
+      <div class="row"><label>Rotate Z</label><input id="rz" type="range" min="-180" max="180" value="0" /><span id="rzv" class="mono">0°</span></div>
+
+      <div class="row">
+        <button id="center">Auto-center on bed</button>
+        <button id="reset">Reset</button>
+      </div>
+
+      <h2>Export</h2>
+      <div class="row">
+        <button id="exportStl">Download transformed STL</button>
+      </div>
+      <div class="row">
+        <button id="exportProfile">Download Kobra 3 starter profile (JSON)</button>
+      </div>
+
+      <h2>Info</h2>
+      <div id="info" class="mono">No model loaded.</div>
+
+      <hr style="border-color:#1f2a37; margin:14px 0;" />
+      <div class="hint">
+        If you want, I can also add:
+        <ul>
+          <li>Support blocker painting (preview)</li>
+          <li>Simple slicing via WebAssembly (limited)</li>
+          <li>Direct upload to a “jobs” folder on your server</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="canvas">
+      <div class="badge">Drag to orbit • Wheel to zoom • Right-drag to pan</div>
+      <canvas id="viewer"></canvas>
+    </div>
+  </div>
+
+  <!-- Import map: Three.js modules from CDN -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+    import { STLLoader } from "three/addons/loaders/STLLoader.js";
+
+    // ---- DOM ----
+    const $ = (id) => document.getElementById(id);
+    const fileInput = $("file");
+    const drop = $("drop");
+    const info = $("info");
+
+    const bedX = $("bedX");
+    const bedY = $("bedY");
+    const bedZ = $("bedZ");
+
+    const scaleInput = $("scale");
+    const rx = $("rx"), ry = $("ry"), rz = $("rz");
+    const rxv = $("rxv"), ryv = $("ryv"), rzv = $("rzv");
+
+    const btnFit = $("fit");
+    const btnCenter = $("center");
+    const btnReset = $("reset");
+    const btnExportStl = $("exportStl");
+    const btnExportProfile = $("exportProfile");
+
+    // ---- Three.js scene ----
+    const canvas = $("viewer");
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.max(1, window.devicePixelRatio || 1));
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0b0f14);
+
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 5000);
+    camera.position.set(260, 260, 260);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+
+    const light1 = new THREE.DirectionalLight(0xffffff, 1.0);
+    light1.position.set(1, 2, 1);
+    scene.add(light1);
+
+    const light2 = new THREE.AmbientLight(0xffffff, 0.35);
+    scene.add(light2);
+
+    // Bed visuals (grid + outline)
+    const bedGroup = new THREE.Group();
+    scene.add(bedGroup);
+
+    function makeBed() {
+      bedGroup.clear();
+      const x = Number(bedX.value);
+      const y = Number(bedY.value);
+
+      // Grid
+      const grid = new THREE.GridHelper(Math.max(x, y), Math.round(Math.max(x, y) / 10));
+      grid.rotation.x = Math.PI / 2; // make it XY plane? (GridHelper is XZ by default)
+      // Actually GridHelper is XZ. We'll keep it XZ and treat bed plane as XZ for viewer.
+      grid.rotation.x = 0;
+      bedGroup.add(grid);
+
+      // Outline rectangle on bed plane (XZ)
+      const shape = new THREE.Shape();
+      shape.moveTo(-x/2, -y/2);
+      shape.lineTo( x/2, -y/2);
+      shape.lineTo( x/2,  y/2);
+      shape.lineTo(-x/2,  y/2);
+      shape.lineTo(-x/2, -y/2);
+
+      const points = shape.getPoints();
+      const geom = new THREE.BufferGeometry().setFromPoints(points.map(p => new THREE.Vector3(p.x, 0, p.y)));
+      const line = new THREE.Line(geom, new THREE.LineBasicMaterial({ color: 0x4aa3ff }));
+      bedGroup.add(line);
+    }
+
+    makeBed();
+    [bedX, bedY, bedZ].forEach(el => el.addEventListener("input", () => { makeBed(); updateInfo(); }));
+
+    // Resize
+    function onResize() {
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    }
+    window.addEventListener("resize", onResize);
+    onResize();
+
+    // ---- Model handling ----
+    let mesh = null;
+    let originalGeometry = null; // BufferGeometry from STL
+    const stlLoader = new STLLoader();
+
+    function setModel(geometry) {
+      if (mesh) {
+        scene.remove(mesh);
+        mesh.geometry.dispose();
+        mesh.material.dispose();
+      }
+
+      originalGeometry = geometry.clone(); // keep pristine copy for re-export
+      geometry.computeVertexNormals();
+
+      const material = new THREE.MeshStandardMaterial({ color: 0xd6dde6, metalness: 0.05, roughness: 0.85 });
+      mesh = new THREE.Mesh(geometry, material);
+      mesh.rotation.set(0, 0, 0);
+      mesh.scale.set(1, 1, 1);
+
+      // Place model above bed (bed is at y=0). We'll keep viewer axes:
+      // X (left/right), Z (front/back), Y (up)
+      centerOnBed(true);
+      scene.add(mesh);
+
+      // Reframe camera
+      const box = new THREE.Box3().setFromObject(mesh);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+      const r = Math.max(size.x, size.y, size.z) * 1.2;
+      controls.target.set(0, size.y * 0.25, 0);
+      camera.position.set(r, r, r);
+
+      updateInfo();
+    }
+
+    function loadFile(file) {
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const arrayBuffer = reader.result;
+          const geom = stlLoader.parse(arrayBuffer);
+          setModel(geom);
+        } catch (e) {
+          info.textContent = "Failed to parse STL.";
+          console.error(e);
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    }
+
+    fileInput.addEventListener("change", (e) => loadFile(e.target.files?.[0]));
+
+    // Drag & drop
+    drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.style.borderColor = "#4aa3ff"; });
+    drop.addEventListener("dragleave", () => { drop.style.borderColor = "#2b3a50"; });
+    drop.addEventListener("drop", (e) => {
+      e.preventDefault();
+      drop.style.borderColor = "#2b3a50";
+      const file = e.dataTransfer.files?.[0];
+      if (file) loadFile(file);
+    });
+
+    // ---- Transform controls ----
+    function degToRad(d) { return d * Math.PI / 180; }
+
+    function applyUITransform() {
+      if (!mesh) return;
+
+      const s = Number(scaleInput.value) || 1;
+      mesh.scale.set(s, s, s);
+
+      mesh.rotation.set(degToRad(Number(rx.value)), degToRad(Number(ry.value)), degToRad(Number(rz.value)));
+
+      rxv.textContent = `${rx.value}°`;
+      ryv.textContent = `${ry.value}°`;
+      rzv.textContent = `${rz.value}°`;
+
+      updateInfo();
+    }
+
+    [scaleInput, rx, ry, rz].forEach(el => el.addEventListener("input", applyUITransform));
+
+    function centerOnBed(ensureAbove=false) {
+      if (!mesh) return;
+      // Center XZ, and set minY to bed plane (y=0) if ensureAbove
+      const box = new THREE.Box3().setFromObject(mesh);
+      const center = new THREE.Vector3();
+      box.getCenter(center);
+
+      // Move to origin in XZ
+      mesh.position.x -= center.x;
+      mesh.position.z -= center.z;
+
+      if (ensureAbove) {
+        const box2 = new THREE.Box3().setFromObject(mesh);
+        const minY = box2.min.y;
+        mesh.position.y -= minY; // lift so min y = 0
+      }
+      updateInfo();
+    }
+
+    btnCenter.addEventListener("click", () => centerOnBed(true));
+
+    function resetAll() {
+      if (!mesh) return;
+      scaleInput.value = 1;
+      rx.value = 0; ry.value = 0; rz.value = 0;
+      mesh.position.set(0, 0, 0);
+      applyUITransform();
+      centerOnBed(true);
+    }
+    btnReset.addEventListener("click", resetAll);
+
+    function fitToBed() {
+      if (!mesh) return;
+      // Determine scale so bounding box fits within bed X/Y and bed Z height
+      // Our viewer uses XZ as bed plane; treat bedX as X and bedY as Z.
+      const bx = Number(bedX.value), by = Number(bedY.value), bz = Number(bedZ.value);
+
+      // Temporarily compute box at current rotation but scale=1
+      const prevS = mesh.scale.x;
+      mesh.scale.set(1,1,1);
+      const box = new THREE.Box3().setFromObject(mesh);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+
+      const maxScaleX = (bx * 0.98) / Math.max(0.0001, size.x);
+      const maxScaleZ = (by * 0.98) / Math.max(0.0001, size.z);
+      const maxScaleY = (bz * 0.98) / Math.max(0.0001, size.y);
+      const s = Math.min(maxScaleX, maxScaleZ, maxScaleY);
+
+      mesh.scale.set(prevS, prevS, prevS);
+      scaleInput.value = Math.max(0.01, Math.floor(s * 100) / 100);
+      applyUITransform();
+      centerOnBed(true);
+    }
+    btnFit.addEventListener("click", fitToBed);
+
+    function updateInfo() {
+      if (!mesh) { info.textContent = "No model loaded."; return; }
+      const box = new THREE.Box3().setFromObject(mesh);
+      const size = new THREE.Vector3(); box.getSize(size);
+
+      const withinX = size.x <= Number(bedX.value) + 1e-6;
+      const withinZ = size.z <= Number(bedY.value) + 1e-6;
+      const withinY = size.y <= Number(bedZ.value) + 1e-6;
+
+      info.innerHTML =
+        `Size (mm): X=${size.x.toFixed(2)}  Y=${size.y.toFixed(2)}  Z=${size.z.toFixed(2)}<br>` +
+        `Position: x=${mesh.position.x.toFixed(2)} y=${mesh.position.y.toFixed(2)} z=${mesh.position.z.toFixed(2)}<br>` +
+        `Scale: ${mesh.scale.x.toFixed(3)}<br>` +
+        `Fits bed: X=${withinX ? "yes" : "<span class='warn'>no</span>"} ` +
+        `Z=${withinZ ? "yes" : "<span class='warn'>no</span>"} ` +
+        `Y=${withinY ? "yes" : "<span class='warn'>no</span>"}`;
+    }
+
+    // ---- Export transformed STL (binary) ----
+    function exportTransformedSTL() {
+      if (!mesh || !originalGeometry) return alert("Load an STL first.");
+
+      // Clone original so we can apply same transforms and bake them into vertices.
+      const geom = originalGeometry.clone();
+      geom.applyMatrix4(mesh.matrixWorld); // bake: position/rotation/scale
+
+      // Ensure it's non-indexed for STL triangles
+      const nonIndexed = geom.index ? geom.toNonIndexed() : geom;
+      const pos = nonIndexed.getAttribute("position");
+      const triCount = pos.count / 3;
+
+      // Build binary STL: 80-byte header + 4-byte count + 50 bytes per triangle
+      const buffer = new ArrayBuffer(84 + triCount * 50);
+      const view = new DataView(buffer);
+
+      // Header
+      const header = "Ahoy-Matey STL Prep";
+      for (let i = 0; i < 80; i++) view.setUint8(i, i < header.length ? header.charCodeAt(i) : 0);
+
+      view.setUint32(80, triCount, true);
+
+      let offset = 84;
+      const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vC = new THREE.Vector3();
+      const n = new THREE.Vector3();
+
+      for (let t = 0; t < triCount; t++) {
+        const i0 = t * 3;
+        vA.fromBufferAttribute(pos, i0 + 0);
+        vB.fromBufferAttribute(pos, i0 + 1);
+        vC.fromBufferAttribute(pos, i0 + 2);
+
+        // Compute normal
+        n.copy(vB).sub(vA).cross(vC.clone().sub(vA)).normalize();
+
+        // normal (3 floats)
+        view.setFloat32(offset + 0, n.x, true);
+        view.setFloat32(offset + 4, n.y, true);
+        view.setFloat32(offset + 8, n.z, true);
+
+        // vertices (9 floats)
+        const vs = [vA, vB, vC];
+        let o = offset + 12;
+        for (const v of vs) {
+          view.setFloat32(o + 0, v.x, true);
+          view.setFloat32(o + 4, v.y, true);
+          view.setFloat32(o + 8, v.z, true);
+          o += 12;
+        }
+
+        // attribute byte count
+        view.setUint16(offset + 48, 0, true);
+        offset += 50;
+      }
+
+      const blob = new Blob([buffer], { type: "application/sla" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "transformed.stl";
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    }
+    btnExportStl.addEventListener("click", exportTransformedSTL);
+
+    // ---- Export starter profile (JSON reference) ----
+    function exportKobra3Profile() {
+      // This is intentionally a "starter" reference object.
+      // Your slicer likely has its own machine/profile format; you can map values from here.
+      const profile = {
+        printer: {
+          name: "Anycubic Kobra 3 (starter)",
+          bed_size_mm: { x: Number(bedX.value), y: Number(bedY.value), z: Number(bedZ.value) },
+          nozzle_diameter_mm: 0.4,
+          filament_diameter_mm: 1.75,
+          gcode_flavor: "Marlin",
+          start_gcode: [
+            "; --- START GCODE (starter) ---",
+            "M104 S{first_layer_temperature[0]}",
+            "M140 S{first_layer_bed_temperature[0]}",
+            "G28",
+            "M190 S{first_layer_bed_temperature[0]}",
+            "M109 S{first_layer_temperature[0]}",
+            "G92 E0",
+            "G1 Z2.0 F3000",
+            "G1 X5 Y10 F3000",
+            "G1 Z0.28 F3000",
+            "G1 X5 Y200 E15 F1200",
+            "G92 E0",
+            "; --- END START GCODE ---"
+          ].join("\n"),
+          end_gcode: [
+            "; --- END GCODE (starter) ---",
+            "G91",
+            "G1 E-1 F2700",
+            "G1 Z10 F3000",
+            "G90",
+            "G1 X0 Y220 F3000",
+            "M104 S0",
+            "M140 S0",
+            "M106 S0",
+            "M84"
+          ].join("\n")
+        },
+        slicing_defaults: {
+          layer_height_mm: 0.2,
+          first_layer_height_mm: 0.28,
+          perimeters: 2,
+          top_layers: 4,
+          bottom_layers: 4,
+          infill_percent: 15,
+          print_speed_mm_s: 60,
+          first_layer_speed_mm_s: 20,
+          travel_speed_mm_s: 150,
+          temperature_c: 205,
+          bed_temperature_c: 60,
+          retraction_mm: 0.8,
+          retraction_speed_mm_s: 35
+        },
+        notes: "This JSON is a reference starter profile; import support depends on your slicer. Use values to configure OrcaSlicer/PrusaSlicer/Cura/Anycubic Slicer."
+      };
+
+      const blob = new Blob([JSON.stringify(profile, null, 2)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "anycubic-kobra3-starter-profile.json";
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    }
+    btnExportProfile.addEventListener("click", exportKobra3Profile);
+
+    // ---- Render loop ----
+    function animate() {
+      controls.update();
+      renderer.render(scene, camera);
+      requestAnimationFrame(animate);
+    }
+    animate();
+  </script>
+</body>
+</html>
